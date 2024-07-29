@@ -1,0 +1,260 @@
+#!/usr/bin/env python
+
+# Edit this script to add your team's code. Some functions are *required*, but you can edit most parts of the required functions,
+# change or remove non-required functions, and add your own functions.
+
+################################################################################
+#
+# Optional libraries, functions, and variables. You can change or remove them.
+#
+################################################################################
+
+import joblib
+import numpy as np
+import os
+import sys
+
+from helper_code import *
+from model import *
+from dataset import *
+
+################################################################################
+#
+# Required functions. Edit these functions to add your code, but do not change the arguments of the functions.
+#
+################################################################################
+
+# Train your models. This function is *required*. You should edit this function to add your code, but do *not* change the arguments
+# of this function. If you do not train one of the models, then you can return None for the model.
+
+# Train your digitization model.
+def train_models(data_folder, model_folder, verbose):
+    # Find the data files.
+    if verbose:
+        print('Finding the Challenge data...')
+
+    records = find_records(data_folder)
+    num_records = len(records)
+
+    if num_records == 0:
+        raise FileNotFoundError('No data were provided.')
+
+    # Train the digitization model. If you are not training a digitization model, then you can remove this part of the code.
+
+    if verbose:
+        print('Training the digitization model...')
+
+    # Extract the features and labels from the data.
+    if verbose:
+        print('Extracting features and labels from the data...')
+
+    digitization_features = list()
+    classification_features = list()
+    classification_labels = list()
+
+    # Iterate over the records.
+    for i in range(num_records):
+        if verbose:
+            width = len(str(num_records))
+            print(f'- {i+1:>{width}}/{num_records}: {records[i]}...')
+
+        record = os.path.join(data_folder, records[i])
+
+        # Extract the features from the image; this simple example uses the same features for the digitization and classification
+        # tasks.
+        features = extract_features(record)
+        
+        digitization_features.append(features)
+
+        # Some images may not be labeled...
+        labels = load_labels(record)
+        if any(label for label in labels):
+            classification_features.append(features)
+            classification_labels.append(labels)
+
+    # ... but we expect some images to be labeled for classification.
+    if not classification_labels:
+        raise Exception('There are no labels for the data.')
+
+    # Train the models.
+    if verbose:
+        print('Training the models on the data...')
+
+    # Train the digitization model. This very simple model uses the mean of these very simple features as a seed for a random number
+    # generator.
+    digitization_model = np.mean(features)
+
+    # Train the classification model. If you are not training a classification model, then you can remove this part of the code.
+    IMG_SIZE_SEGMENT = 1024
+    LR_SEGMENT = 0.01
+
+    MODEL_FD = "model"
+    LOG_FD = "logs"
+
+
+    net = unet(
+        img_size=(IMG_SIZE_SEGMENT, IMG_SIZE_SEGMENT),
+        no_channels=3,
+        start_neurons=16
+    )
+    # net.summary()
+    # print(net.count_params(), net.inputs, net.outputs)
+
+    train_data_dir = data_folder
+    val_data_dir = 'data/06000'
+
+    # data generator
+    train_generator = SegmentData(
+        train_data_dir,
+        img_size=(IMG_SIZE_SEGMENT, IMG_SIZE_SEGMENT)
+    )
+    val_generator = SegmentData(
+        val_data_dir,
+        img_size=(IMG_SIZE_SEGMENT, IMG_SIZE_SEGMENT),
+    )
+    print("train len: ",len(train_generator))
+    print("",len(val_generator))
+
+
+    optim = optimizers.Adam(learning_rate=LR_SEGMENT)
+    net.compile(loss=bce_dice_loss, optimizer=optim,
+                    metrics=[ dice_coef])
+
+    import time
+
+    # callbacks
+    checkpoint = callbacks.ModelCheckpoint(
+        os.path.join(MODEL_FD, "moody_{}_{}_cps.keras".format(
+            IMG_SIZE_SEGMENT, time.time()
+        )),
+        monitor='val_loss', verbose=1, save_best_only=True, mode='min'
+    )
+    early = callbacks.EarlyStopping(
+        monitor="val_loss", mode="min", patience=4, verbose=1)
+    redonplat = callbacks.ReduceLROnPlateau(
+        monitor="val_loss", factor=0.1, mode="min", patience=3, verbose=1
+    )
+    csv_logger = callbacks.CSVLogger(
+        os.path.join(LOG_FD, 'moody_log_{}_{}.csv'.format(
+            IMG_SIZE_SEGMENT, time.time()
+        )),
+        append=False, separator=','
+    )
+
+    callbacks_list = [
+        checkpoint,
+        early,
+        redonplat,
+        csv_logger,
+    ]
+
+    history = net.fit(
+        train_generator,
+        steps_per_epoch=len(train_generator),
+        epochs=20,
+        callbacks=callbacks_list,
+        validation_data=val_generator,
+        validation_steps=len(val_generator),
+    )
+
+    train_data_dir = prepare_data(net, train_data_dir, (IMG_SIZE_SEGMENT, IMG_SIZE_SEGMENT), 3)
+    
+    records = find_records(train_data_dir)
+    print(len(records))
+    num_records = len(records)
+    classification_labels = list()
+    for i in range(num_records):
+        record = os.path.join(train_data_dir, records[i])
+        labels = load_labels(record)
+        if any(label for label in labels):
+            classification_labels.append(labels)
+    classes = sorted(set.union(*map(set, classification_labels)))
+    classification_labels = compute_one_hot_encoding(classification_labels, classes)
+    
+    # Create a folder for the models if it does not already exist.
+    os.makedirs(model_folder, exist_ok=True)
+
+    # Save the models.
+    save_models(model_folder, digitization_model, classification_model, classes)
+
+    if verbose:
+        print('Done.')
+        print()
+
+# Load your trained models. This function is *required*. You should edit this function to add your code, but do *not* change the
+# arguments of this function. If you do not train one of the models, then you can return None for the model.
+def load_models(model_folder, verbose):
+    digitization_filename = os.path.join(model_folder, 'digitization_model.sav')
+    digitization_model = joblib.load(digitization_filename)
+
+    classification_filename = os.path.join(model_folder, 'classification_model.sav')
+    classification_model = joblib.load(classification_filename)
+    return digitization_model, classification_model
+
+# Run your trained digitization model. This function is *required*. You should edit this function to add your code, but do *not*
+# change the arguments of this function. If you did not train one of the models, then you can return None for the model.
+def run_models(record, digitization_model, classification_model, verbose):
+    # Run the digitization model; if you did not train this model, then you can set signal = None.
+
+    # Load the digitization model.
+    model = digitization_model['model']
+
+    # Load the dimensions of the signal.
+    header_file = get_header_file(record)
+    header = load_text(header_file)
+
+    num_samples = get_num_samples(header)
+    num_signals = get_num_signals(header)
+
+    # Extract the features.
+    features = extract_features(record)
+    features = features.reshape(1, -1)
+
+    # Generate "random" waveforms using the a random seed from the features.
+    seed = int(round(model + np.mean(features)))
+    signal = np.random.default_rng(seed=seed).uniform(low=-1, high=1, size=(num_samples, num_signals))
+    
+    # Run the classification model; if you did not train this model, then you can set labels = None.
+
+    # Load the classification model and classes.
+    model = classification_model['model']
+    classes = classification_model['classes']
+
+    # Get the model probabilities.
+    probabilities = model.predict_proba(features)
+    probabilities = np.asarray(probabilities, dtype=np.float32)[:, 0, 1]
+
+    # Choose the class or classes with the highest probability as the label or labels.
+    max_probability = np.nanmax(probabilities)
+    labels = [classes[i] for i, probability in enumerate(probabilities) if probability == max_probability]
+
+    return signal, labels
+
+################################################################################
+#
+# Optional functions. You can change or remove these functions and/or add new functions.
+#
+################################################################################
+
+# Extract features.
+def extract_features(record):
+    images = load_images(record)
+    mean = 0.0
+    std = 0.0
+    for image in images:
+        image = np.asarray(image)
+        mean += np.mean(image)
+        std += np.std(image)
+    return np.array([mean, std])
+
+# Save your trained models.
+def save_models(model_folder, digitization_model=None, classification_model=None, classes=None):
+    if digitization_model is not None:
+        d = {'model': digitization_model}
+        filename = os.path.join(model_folder, 'digitization_model.sav')
+        joblib.dump(d, filename, protocol=0)
+
+    if classification_model is not None:
+        d = {'model': classification_model, 'classes': classes}
+        filename = os.path.join(model_folder, 'classification_model.sav')
+        joblib.dump(d, filename, protocol=0)
